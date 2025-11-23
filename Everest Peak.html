@@ -1,0 +1,1632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EVEREST PEAK | High-Altitude Solutions</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // NOTE: Added getDocs and writeBatch for the Finance feature
+        import { getFirestore, doc, addDoc, onSnapshot, collection, query, where, serverTimestamp, getDocs, writeBatch } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+
+        // Global Firebase and App Variables
+        window.firebaseApp = null;
+        window.db = null;
+        window.auth = null;
+        window.userId = null;
+        window.isAuthReady = false;
+
+        // Configuration and App ID
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Log all Firebase issues for debugging
+        setLogLevel('debug'); 
+
+        // --- Firebase Initialization and Authentication ---
+        const FirebaseService = {
+            async init() {
+                try {
+                    window.firebaseApp = initializeApp(firebaseConfig);
+                    window.db = getFirestore(window.firebaseApp);
+                    window.auth = getAuth(window.firebaseApp);
+
+                    // 1. Authenticate using the custom token or anonymously
+                    if (initialAuthToken) {
+                        await signInWithCustomToken(window.auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(window.auth);
+                    }
+                    
+                    // 2. Set up Auth State Listener
+                    onAuthStateChanged(window.auth, (user) => {
+                        window.isAuthReady = true;
+                        if (user) {
+                            // Use the authenticated user's UID
+                            window.userId = user.uid; 
+                            // console.log("Authenticated User ID:", window.userId);
+
+                            // Update UI and close modal
+                            document.getElementById('user-id-display').textContent = `User ID: ${window.userId}`;
+                            document.getElementById('auth-status').textContent = 'Signed In';
+                            document.getElementById('sign-out-btn').classList.remove('hidden');
+                            document.getElementById('sign-in-prompt-btn').classList.add('hidden');
+                            ModalManager.close('authModal');
+                            
+                            // Load user-specific data (Products and Finance)
+                            DataService.loadInitialData();
+                            
+                        } else {
+                            // If user signs out or initial sign-in fails, fall back to a random ID
+                            window.userId = crypto.randomUUID();
+                            // console.log("Anonymous/Fallback User ID:", window.userId);
+                            
+                            document.getElementById('user-id-display').textContent = `User ID: ${window.userId}`;
+                            document.getElementById('auth-status').textContent = 'Anonymous';
+                            document.getElementById('sign-out-btn').classList.add('hidden');
+                            document.getElementById('sign-in-prompt-btn').classList.remove('hidden');
+                            // Force show login modal if not already authenticated
+                            ModalManager.open('authModal');
+                        }
+                        // Render UI only after auth state is determined
+                        Router.init(); 
+                        DataRenderer.renderAll();
+                    });
+
+                } catch (error) {
+                    console.error("Firebase Initialization Error:", error);
+                    // Fallback if Firebase initialization fails entirely
+                    window.isAuthReady = true;
+                    window.userId = crypto.randomUUID();
+                    Router.init(); 
+                    DataRenderer.renderAll();
+                }
+            },
+            
+            // SECURITY FEATURE: User Sign Up
+            async signUp(email, password) {
+                try {
+                    await createUserWithEmailAndPassword(window.auth, email, password);
+                    return { success: true, message: "Registration successful! You are now signed in." };
+                } catch (error) {
+                    return { success: false, message: error.message };
+                }
+            },
+
+            // SECURITY FEATURE: User Sign In
+            async signIn(email, password) {
+                try {
+                    await signInWithEmailAndPassword(window.auth, email, password);
+                    return { success: true, message: "Sign-in successful!" };
+                } catch (error) {
+                    return { success: false, message: error.message };
+                }
+            },
+            
+            // SECURITY FEATURE: Sign Out
+            async signOutUser() {
+                try {
+                    await signOut(window.auth);
+                    // Re-authenticate anonymously to keep the session alive with a new ID
+                    await signInAnonymously(window.auth); 
+                    // The onAuthStateChanged listener will handle UI updates
+                    return { success: true, message: "Successfully signed out." };
+                } catch (error) {
+                    console.error("Sign Out Error:", error);
+                    return { success: false, message: error.message };
+                }
+            }
+        };
+
+        // --- Data Persistence and Real-time Updates (Firestore) ---
+        window.appData = {
+            products: [],
+            rankings: [
+                { id: 1, name: "GeoRank Pro", score: 9.8, trend: "up" },
+                { id: 2, name: "CallLog Defender", score: 9.2, trend: "stable" },
+                { id: 3, name: "Design Hub Elite", score: 8.5, trend: "down" },
+                { id: 4, name: "Data Vault Secure", score: 9.5, trend: "up" },
+            ],
+            // Finance data structure
+            balance: 0,
+            hasCreditCard: false,
+            transactions: [],
+            // NEW: Call Log data structure
+            callLogs: [],
+            // NEW: Display Feature Data (Simulated Popular Products)
+            popularProducts: [
+                { id: 'p001', name: "A.I. GeoRanker v2", category: "Software", rating: 4.9, designScore: 95, popular: true },
+                { id: 'p002', name: "Secure Data Vault API", category: "Data", rating: 4.7, designScore: 88, popular: true },
+                { id: 'p003', name: "Quantum-Proof Hardware Key", category: "Hardware", rating: 4.8, designScore: 92, popular: false },
+                { id: 'p004', name: "Managed Scaling Service", category: "Service", rating: 4.6, designScore: 85, popular: true },
+            ],
+            // NEW: Salesman Feature Data (Simulated Top Product Creators)
+            salesmenData: [
+                { category: "Software", name: "Elara Vance", product: "A.I. GeoRanker v2", rating: 4.9, phone: "555-SW-001", social: "@Elara_Code", avatarColor: "bg-blue-100" },
+                { category: "Hardware", name: "Ryu Chen", product: "Quantum-Proof Hardware Key", rating: 4.8, phone: "555-HW-002", social: "@Ryu_Mech", avatarColor: "bg-red-100" },
+                { category: "Data", name: "Maya Singh", product: "Secure Data Vault API", rating: 4.7, phone: "555-DT-003", social: "@MayaDataSci", avatarColor: "bg-green-100" },
+                { category: "Service", name: "Jaxon Reed", product: "Managed Scaling Service", rating: 4.6, phone: "555-SV-004", social: "@Jaxon_Consult", avatarColor: "bg-yellow-100" },
+            ]
+        };
+        
+        const DataService = {
+            // Secure private collection path for user product data: /artifacts/{appId}/users/{userId}/products
+            getProductCollectionRef() {
+                return collection(window.db, `artifacts/${appId}/users/${window.userId}/products`);
+            },
+            
+            // Secure private collection path for user finance data: /artifacts/{appId}/users/{userId}/payments
+            getFinanceCollectionRef() {
+                return collection(window.db, `artifacts/${appId}/users/${window.userId}/payments`);
+            },
+
+            // NEW: Secure private collection path for user call log data: /artifacts/{appId}/users/{userId}/calllogs
+            getCallLogCollectionRef() {
+                return collection(window.db, `artifacts/${appId}/users/${window.userId}/calllogs`);
+            },
+            
+            // Feature: Product Creation (Design Hub Feature)
+            async createProduct(name, description, category) {
+                if (!window.db || !window.userId) {
+                    console.error("Database not ready or User not authenticated.");
+                    return { success: false, message: "System not ready. Please try again." };
+                }
+                try {
+                    const newProductRef = await addDoc(this.getProductCollectionRef(), {
+                        name: name,
+                        description: description,
+                        category: category,
+                        createdAt: serverTimestamp(),
+                        createdBy: window.userId,
+                    });
+                    return { success: true, message: `Product '${name}' created successfully!`, id: newProductRef.id };
+                } catch (e) {
+                    console.error("Error creating product: ", e);
+                    return { success: false, message: "Failed to create product. Check console for details." };
+                }
+            },
+
+            // NEW FEATURE: Deposit Funds Simulation
+            async depositFunds(amount) {
+                if (!window.db || !window.userId || amount <= 0) {
+                    return { success: false, message: "Invalid amount or system not ready." };
+                }
+                try {
+                    await addDoc(this.getFinanceCollectionRef(), {
+                        type: 'DEPOSIT',
+                        amount: amount,
+                        status: window.appData.hasCreditCard ? 'PROCESSED' : 'STORED', // If card connected, process instantly
+                        timestamp: serverTimestamp(),
+                        userId: window.userId,
+                    });
+                    return { success: true, message: `Successfully recorded \$${amount.toFixed(2)}!` };
+                } catch (e) {
+                    console.error("Error depositing funds: ", e);
+                    return { success: false, message: "Failed to record deposit." };
+                }
+            },
+            
+            // NEW FEATURE: Simulate Credit Card Connection / Fund Transfer
+            async transferFunds() {
+                if (!window.db || !window.userId) {
+                     return { success: false, message: "System not ready." };
+                }
+
+                if (window.appData.balance <= 0) {
+                    return { success: false, message: "No stored funds to transfer." };
+                }
+                
+                try {
+                    const storedBalance = window.appData.balance;
+
+                    // 1. Log the transfer action as a transaction (clearing the stored balance)
+                    await addDoc(this.getFinanceCollectionRef(), {
+                        type: 'TRANSFER_OUT',
+                        amount: storedBalance * -1, // Negative amount
+                        status: 'PROCESSED',
+                        timestamp: serverTimestamp(),
+                        userId: window.userId,
+                        notes: 'Funds transferred upon credit card connection.'
+                    });
+                    
+                    // 2. Mark all previous 'STORED' deposits as 'TRANSFERRED'
+                    const q = query(this.getFinanceCollectionRef(), where('status', '==', 'STORED'));
+                    const snapshot = await getDocs(q);
+                    const batch = writeBatch(window.db);
+                    
+                    snapshot.forEach((doc) => {
+                        batch.update(doc.ref, { status: 'TRANSFERRED' });
+                    });
+                    await batch.commit();
+
+                    // 3. Update the local state
+                    window.appData.hasCreditCard = true; 
+                    
+                    return { success: true, message: `Successfully connected credit card and transferred \$${storedBalance.toFixed(2)} to your account!` };
+
+                } catch (e) {
+                    console.error("Error transferring funds: ", e);
+                    return { success: false, message: "Failed to process transfer." };
+                }
+            },
+
+            // NEW FEATURE: Log a Simulated Call
+            async logCall(type, number, durationMinutes) {
+                if (!window.db || !window.userId || durationMinutes <= 0) {
+                    return { success: false, message: "Invalid duration or system not ready." };
+                }
+
+                const direction = type.toUpperCase().includes('OUT') ? 'Outgoing' : 'Incoming';
+                const callType = type.toUpperCase().includes('MISSED') ? 'Missed' : 'Completed';
+
+                try {
+                    await addDoc(this.getCallLogCollectionRef(), {
+                        direction: direction,
+                        callType: callType,
+                        phoneNumber: number,
+                        duration: durationMinutes, // Stored in minutes
+                        timestamp: serverTimestamp(),
+                        userId: window.userId,
+                    });
+                    return { success: true, message: `Successfully logged a ${direction} call of ${durationMinutes} minutes!` };
+                } catch (e) {
+                    console.error("Error logging call: ", e);
+                    return { success: false, message: "Failed to log call." };
+                }
+            },
+
+
+            // Feature: Real-time Data Loading for Products and Finance
+            loadInitialData() {
+                if (!window.db || !window.userId || !window.isAuthReady) return;
+
+                // Existing: Product Listener
+                const productQ = query(this.getProductCollectionRef());
+                onSnapshot(productQ, (snapshot) => {
+                    const products = [];
+                    snapshot.forEach((doc) => {
+                        products.push({ id: doc.id, ...doc.data() });
+                    });
+                    window.appData.products = products;
+                    // Update dashboard card count
+                    document.getElementById('total-products-count').textContent = products.length;
+                    DataRenderer.renderProductList(); 
+                }, (error) => {
+                    console.error("Error loading products:", error);
+                });
+
+                // Existing: Finance/Payment Listener
+                const financeQ = query(this.getFinanceCollectionRef());
+                onSnapshot(financeQ, (snapshot) => {
+                    const transactions = [];
+                    let currentBalance = 0;
+                    
+                    snapshot.forEach((doc) => {
+                        const data = doc.data();
+                        transactions.push({ id: doc.id, ...data });
+                        
+                        // Only count funds that are 'STORED' (waiting for card connection)
+                        // This calculation is purely for display in the Finance tab.
+                        if (data.status === 'STORED') {
+                             currentBalance += data.amount;
+                        }
+                    });
+                    
+                    // Sort transactions by timestamp (descending)
+                    transactions.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+                    window.appData.transactions = transactions;
+                    window.appData.balance = currentBalance;
+                    DataRenderer.renderFinanceView(); // Update the finance view
+                }, (error) => {
+                    console.error("Error loading finance data:", error);
+                });
+
+                // NEW: Call Log Listener
+                const callLogQ = query(this.getCallLogCollectionRef());
+                onSnapshot(callLogQ, (snapshot) => {
+                    const logs = [];
+                    snapshot.forEach((doc) => {
+                        logs.push({ id: doc.id, ...doc.data() });
+                    });
+                    
+                    // Sort logs by timestamp (descending)
+                    logs.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+
+                    window.appData.callLogs = logs;
+                    DataRenderer.renderSocialHubView(); // Update the social hub view
+                }, (error) => {
+                    console.error("Error loading call logs:", error);
+                });
+            }
+        };
+
+        // --- UI Rendering Utilities ---
+        const DataRenderer = {
+            // Render the small dashboard chart
+            renderDashboardChart() {
+                const ctx = document.getElementById('geoRankChart');
+                if (!ctx) return;
+                
+                // Destroy existing chart if it exists
+                if (window.dashboardChart) window.dashboardChart.destroy();
+
+                const rankingsData = window.appData.rankings;
+                
+                window.dashboardChart = new Chart(ctx, {
+                    type: 'line',
+                    data: {
+                        labels: rankingsData.map(r => r.name),
+                        datasets: [{
+                            label: 'Current Ranking Score',
+                            data: rankingsData.map(r => r.score),
+                            borderColor: 'rgb(75, 192, 192)',
+                            tension: 0.4,
+                            fill: true,
+                            backgroundColor: 'rgba(75, 192, 192, 0.1)',
+                            pointBackgroundColor: 'rgb(75, 192, 192)',
+                            pointBorderColor: '#fff',
+                            pointHoverBackgroundColor: '#fff',
+                            pointHoverBorderColor: 'rgb(75, 192, 192)',
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            legend: { display: false },
+                            tooltip: {
+                                mode: 'index',
+                                intersect: false,
+                            }
+                        },
+                        scales: {
+                            y: { 
+                                beginAtZero: false, 
+                                min: 8.0, 
+                                max: 10.0,
+                                grid: {
+                                    color: 'rgba(200, 200, 200, 0.2)'
+                                }
+                            },
+                            x: {
+                                grid: {
+                                    display: false
+                                }
+                            }
+                        }
+                    }
+                });
+            },
+            
+            // Render list of created products in the Products view
+            renderProductList() {
+                const container = document.getElementById('product-list-container');
+                if (!container) return;
+                
+                if (window.appData.products.length === 0) {
+                    container.innerHTML = `
+                        <div class="col-span-full p-10 text-center text-gray-500 bg-gray-50 rounded-xl border border-dashed border-indigo-200">
+                            <i data-lucide="package-open" class="w-16 h-16 mx-auto mb-4 text-indigo-400"></i>
+                            <p class="text-xl font-bold text-gray-700">No Products Created Yet</p>
+                            <p class="text-sm">Head over to the Design Hub to start building your solution!</p>
+                        </div>
+                    `;
+                    lucide.createIcons();
+                    return;
+                }
+
+                container.innerHTML = window.appData.products.map(product => `
+                    <div class="bg-white p-6 shadow-xl rounded-xl border border-gray-100 hover:ring-2 hover:ring-indigo-300 transition duration-300 transform hover:scale-[1.02]">
+                        <div class="flex items-start space-x-4">
+                            <div class="p-3 rounded-full bg-indigo-50 text-indigo-600 shadow-inner">
+                                <i data-lucide="box" class="w-6 h-6"></i>
+                            </div>
+                            <div class="flex-grow">
+                                <h3 class="text-xl font-bold text-gray-800">${product.name}</h3>
+                                <p class="text-sm font-semibold text-indigo-500 mb-2">${product.category}</p>
+                            </div>
+                        </div>
+                        <p class="text-sm text-gray-600 mt-4">${product.description}</p>
+                        <p class="mt-4 text-xs text-gray-400 text-right border-t pt-2">ID: <span class="font-mono">${product.id.substring(0, 12)}...</span></p>
+                    </div>
+                `).join('');
+                
+                lucide.createIcons();
+            },
+            
+            // Render the detailed Rankings table
+            renderRankingsTable() {
+                const tableBody = document.getElementById('rankings-table-body');
+                if (!tableBody) return;
+                
+                tableBody.innerHTML = window.appData.rankings.map(r => {
+                    const trendIcon = r.trend === 'up' ? 'trending-up' : r.trend === 'down' ? 'trending-down' : 'minus';
+                    const trendColor = r.trend === 'up' ? 'text-green-500' : r.trend === 'down' ? 'text-red-500' : 'text-yellow-500';
+                    const trendBg = r.trend === 'up' ? 'bg-green-50' : r.trend === 'down' ? 'bg-red-50' : 'bg-yellow-50';
+                    return `
+                        <tr class="border-b hover:bg-indigo-50/50 transition">
+                            <td class="px-6 py-4 whitespace-nowrap text-lg font-extrabold text-indigo-600">${r.id}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-base font-semibold text-gray-800">${r.name}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-2xl font-black">${r.score}</td>
+                            <td class="px-6 py-4 whitespace-nowrap text-sm">
+                                <span class="inline-flex items-center space-x-1 px-3 py-1 rounded-full font-medium ${trendColor} ${trendBg}">
+                                    <i data-lucide="${trendIcon}" class="w-4 h-4"></i>
+                                    <span>${r.trend.charAt(0).toUpperCase() + r.trend.slice(1)}</span>
+                                </span>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+                
+                lucide.createIcons();
+            },
+
+            // Render the Finance View
+            renderFinanceView() {
+                const container = document.getElementById('finance-view');
+                if (!container || !window.appData.transactions) return;
+
+                const balance = window.appData.balance.toFixed(2);
+                const hasCard = window.appData.hasCreditCard;
+                
+                // Card Status Section
+                document.getElementById('card-status').innerHTML = hasCard ? 
+                    `<div class="inline-flex items-center px-4 py-1 rounded-full text-sm font-medium bg-green-100 text-green-800 shadow-md">
+                        <i data-lucide="check-circle" class="w-4 h-4 mr-1"></i> Credit Card Connected
+                    </div>
+                    <p class="text-gray-600 mt-2 text-sm">Funds are now instantly processed and transferred to your bank.</p>` :
+                    `<div class="inline-flex items-center px-4 py-1 rounded-full text-sm font-medium bg-yellow-100 text-yellow-800 shadow-md">
+                        <i data-lucide="alert-triangle" class="w-4 h-4 mr-1"></i> Card Connection Required
+                    </div>
+                    <p class="text-gray-600 mt-2 text-sm">Your deposited funds are safely stored here until you connect a credit card.</p>`;
+                
+                // Balance Display
+                document.getElementById('stored-balance').textContent = `$${balance}`;
+                
+                // Transfer Button Logic
+                const transferBtn = document.getElementById('transfer-funds-btn');
+                
+                if (hasCard) {
+                    transferBtn.classList.add('hidden');
+                    document.getElementById('transfer-message').textContent = 'Credit card is connected. All future deposits are auto-processed.';
+                    document.getElementById('transfer-message').classList.remove('hidden');
+                    document.getElementById('transfer-message').classList.add('bg-green-100', 'text-green-800', 'p-3', 'rounded-lg', 'font-semibold');
+                } else if (window.appData.balance > 0) {
+                    transferBtn.classList.remove('hidden');
+                    transferBtn.disabled = false;
+                    transferBtn.textContent = `Connect Card & Transfer \$${balance} Now`;
+                    document.getElementById('transfer-message').classList.add('hidden');
+                } else {
+                    transferBtn.classList.add('hidden');
+                    document.getElementById('transfer-message').classList.add('hidden');
+                }
+                
+                // Transaction List
+                const listContainer = document.getElementById('transaction-list');
+                if (window.appData.transactions.length === 0) {
+                    listContainer.innerHTML = `<p class="text-center text-gray-500 py-8 italic">No transactions recorded yet.</p>`;
+                } else {
+                    listContainer.innerHTML = window.appData.transactions.map(t => {
+                        const isDeposit = t.type === 'DEPOSIT';
+                        const isTransfer = t.type === 'TRANSFER_OUT';
+                        const colorClass = isDeposit ? 'text-green-600' : isTransfer ? 'text-red-600' : 'text-gray-600';
+                        const sign = t.amount >= 0 ? '+' : ''; // Transfer out is already negative in the amount
+                        const date = t.timestamp ? new Date(t.timestamp.seconds * 1000).toLocaleString() : 'N/A';
+                        
+                        let statusClass = 'bg-gray-100 text-gray-800';
+                        if (t.status === 'STORED') statusClass = 'bg-yellow-100 text-yellow-800';
+                        if (t.status === 'TRANSFERRED' || t.status === 'PROCESSED') statusClass = 'bg-green-100 text-green-800';
+
+                        return `
+                            <li class="flex justify-between items-center p-4 border-b last:border-b-0 hover:bg-gray-50 transition">
+                                <div class="flex items-center space-x-3">
+                                    <i data-lucide="${isDeposit ? 'trending-up' : 'credit-card'}" class="w-5 h-5 ${colorClass}"></i>
+                                    <div>
+                                        <div class="font-semibold text-gray-800">${t.type.replace('_', ' ')}</div>
+                                        <div class="text-xs text-gray-500">${date}</div>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-lg font-bold ${colorClass}">${sign}${(t.amount).toFixed(2)}</div>
+                                    <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${statusClass}">
+                                        ${t.status}
+                                    </span>
+                                </div>
+                            </li>
+                        `;
+                    }).join('');
+                }
+                
+                lucide.createIcons();
+            },
+
+            // NEW: Render the Social Hub View
+            renderSocialHubView() {
+                const callLogList = document.getElementById('call-log-list');
+                const callLogs = window.appData.callLogs;
+                
+                if (!callLogList) return;
+
+                if (callLogs.length === 0) {
+                    callLogList.innerHTML = `<p class="text-center text-gray-500 py-8 italic">No call logs recorded yet.</p>`;
+                } else {
+                    callLogList.innerHTML = callLogs.map(log => {
+                        const isOutgoing = log.direction === 'Outgoing';
+                        const isMissed = log.callType === 'Missed';
+                        const icon = isOutgoing ? 'phone-outgoing' : isMissed ? 'phone-missed' : 'phone-incoming';
+                        const colorClass = isOutgoing ? 'text-indigo-600' : isMissed ? 'text-red-600' : 'text-green-600';
+                        const bgColorClass = isOutgoing ? 'bg-indigo-50' : isMissed ? 'bg-red-50' : 'bg-green-50';
+                        const date = log.timestamp ? new Date(log.timestamp.seconds * 1000).toLocaleString() : 'N/A';
+                        const durationText = log.callType !== 'Missed' ? `${log.duration} min` : 'N/A';
+                        
+                        return `
+                            <li class="flex justify-between items-center p-4 border-b last:border-b-0 hover:bg-gray-50 transition">
+                                <div class="flex items-center space-x-3">
+                                    <div class="p-2 rounded-full ${bgColorClass} ${colorClass}">
+                                        <i data-lucide="${icon}" class="w-5 h-5"></i>
+                                    </div>
+                                    <div>
+                                        <div class="font-semibold text-gray-800">${log.phoneNumber}</div>
+                                        <div class="text-xs text-gray-500">${date}</div>
+                                    </div>
+                                </div>
+                                <div class="text-right space-y-1">
+                                    <div class="text-sm font-medium text-gray-700">${log.callType} (${log.direction})</div>
+                                    <div class="text-xs text-indigo-500 font-bold">${durationText}</div>
+                                </div>
+                            </li>
+                        `;
+                    }).join('');
+                }
+
+                // Update the call log count in the card
+                document.getElementById('total-call-logs').textContent = callLogs.length;
+
+                lucide.createIcons();
+            },
+
+            // NEW: Render the Display View (Popular Products)
+            renderDisplayView() {
+                const container = document.getElementById('display-product-list');
+                if (!container) return;
+
+                const popular = window.appData.popularProducts;
+
+                container.innerHTML = popular.map(product => `
+                    <div class="bg-white p-6 shadow-2xl rounded-xl border-t-8 border-indigo-600 hover:shadow-3xl transition duration-300">
+                        <div class="flex justify-between items-start">
+                            <h3 class="text-2xl font-bold text-gray-900">${product.name}</h3>
+                            <span class="inline-flex items-center px-3 py-1 text-sm font-semibold rounded-full bg-yellow-100 text-yellow-800">
+                                <i data-lucide="star" class="w-4 h-4 mr-1 fill-yellow-500 text-yellow-500"></i>
+                                ${product.rating.toFixed(1)} Rating
+                            </span>
+                        </div>
+                        <p class="text-sm font-medium text-indigo-600 mt-1">${product.category}</p>
+                        
+                        <div class="mt-4 border-t pt-4 space-y-3">
+                            <div class="flex justify-between items-center">
+                                <span class="text-gray-700 font-medium">Design Quality Score:</span>
+                                <span class="text-2xl font-extrabold ${product.designScore >= 90 ? 'text-green-600' : 'text-orange-600'}">${product.designScore}%</span>
+                            </div>
+                            <div class="w-full bg-gray-200 rounded-full h-2.5">
+                                <div class="h-2.5 rounded-full ${product.designScore >= 90 ? 'bg-green-500' : 'bg-orange-500'}" style="width: ${product.designScore}%"></div>
+                            </div>
+                            ${product.popular ? '<span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-pink-100 text-pink-800 mt-2"><i data-lucide="zap" class="w-3 h-3 mr-1"></i> Popular Pick</span>' : ''}
+                        </div>
+                    </div>
+                `).join('');
+
+                lucide.createIcons();
+            },
+            
+            // NEW: Render the Salesman View (Top Product Creators)
+            renderSalesmanView() {
+                const container = document.getElementById('salesman-list');
+                if (!container) return;
+
+                const salesmen = window.appData.salesmenData;
+
+                container.innerHTML = salesmen.map(salesman => `
+                    <div class="bg-white p-6 shadow-xl rounded-xl border border-gray-100 flex flex-col items-center text-center hover:ring-4 hover:ring-violet-300 transition duration-300">
+                        <div class="p-4 rounded-full ${salesman.avatarColor} ring-4 ring-white shadow-lg mb-4">
+                            <i data-lucide="user" class="w-10 h-10 text-gray-800"></i>
+                        </div>
+                        <h3 class="text-2xl font-bold text-gray-900">${salesman.name}</h3>
+                        <p class="text-sm font-semibold text-violet-600 mb-4">${salesman.category} Category Leader</p>
+                        
+                        <div class="text-left w-full space-y-2">
+                            <p class="text-sm text-gray-700"><span class="font-bold">Top Product:</span> ${salesman.product}</p>
+                            <p class="text-sm text-gray-700 flex items-center"><i data-lucide="star" class="w-4 h-4 mr-2 fill-yellow-500 text-yellow-500"></i> <span class="font-bold">Rating:</span> ${salesman.rating.toFixed(1)}</p>
+                            <div class="border-t pt-3 mt-3 space-y-2">
+                                <p class="text-sm text-gray-700 flex items-center">
+                                    <i data-lucide="phone" class="w-4 h-4 mr-2 text-green-500"></i> 
+                                    <span class="font-bold">Contact:</span> ${salesman.phone}
+                                </p>
+                                <p class="text-sm text-gray-700 flex items-center">
+                                    <i data-lucide="twitter" class="w-4 h-4 mr-2 text-blue-500"></i> 
+                                    <span class="font-bold">Social:</span> ${salesman.social}
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+
+                lucide.createIcons();
+            },
+            
+            renderAll() {
+                this.renderDashboardChart();
+                this.renderProductList();
+                this.renderRankingsTable();
+                this.renderFinanceView(); 
+                this.renderSocialHubView();
+                this.renderDisplayView(); // NEW
+                this.renderSalesmanView(); // NEW
+            }
+        };
+
+        // --- Core Application Logic ---
+        const Router = {
+            currentView: 'dashboard',
+            views: ['dashboard', 'products', 'rankings', 'finance', 'social-hub', 'display', 'salesman', 'design-hub'], // UPDATED: added display and salesman
+            
+            init() {
+                const navLinks = document.querySelectorAll('[data-route]');
+                navLinks.forEach(link => {
+                    link.addEventListener('click', (e) => {
+                        e.preventDefault();
+                        this.navigate(link.dataset.route);
+                    });
+                });
+                
+                // Initial load
+                this.navigate(this.currentView);
+            },
+            
+            navigate(view) {
+                if (!this.views.includes(view)) {
+                    // console.error("Invalid route:", view);
+                    return;
+                }
+                
+                this.currentView = view;
+                
+                // Update navigation links
+                document.querySelectorAll('[data-route]').forEach(link => {
+                    link.classList.remove('bg-indigo-700', 'text-white', 'shadow-md');
+                    link.classList.add('text-indigo-200', 'hover:bg-indigo-600');
+                    if (link.dataset.route === view) {
+                        link.classList.add('bg-indigo-700', 'text-white', 'shadow-md');
+                        link.classList.remove('text-indigo-200', 'hover:bg-indigo-600');
+                    }
+                });
+
+                // Update view content
+                this.views.forEach(v => {
+                    const el = document.getElementById(v + '-view');
+                    if (el) {
+                        el.classList.add('hidden');
+                        if (v === view) {
+                            el.classList.remove('hidden');
+                            // Re-render data for the new view
+                            DataRenderer.renderAll(); 
+                        }
+                    }
+                });
+            }
+        };
+        
+        const ModalManager = {
+            init() {
+                // Initialize close functionality for all modals
+                document.querySelectorAll('.modal-close').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const modalId = btn.closest('.modal-backdrop').id;
+                        this.close(modalId);
+                    });
+                });
+            },
+            
+            open(modalId) {
+                const modal = document.getElementById(modalId);
+                if (modal) {
+                    modal.classList.remove('hidden');
+                    setTimeout(() => modal.classList.remove('opacity-0'), 10);
+                }
+            },
+            
+            close(modalId) {
+                const modal = document.getElementById(modalId);
+                if (modal) {
+                    modal.classList.add('opacity-0');
+                    setTimeout(() => modal.classList.add('hidden'), 300); // Wait for transition
+                }
+            }
+        };
+        
+        // Helper function for showing validation messages
+        function showValidationMessage(element, message, isSuccess = true) {
+            element.textContent = message;
+            element.classList.remove('hidden', 'bg-red-100', 'bg-green-100', 'text-red-800', 'text-green-800');
+            element.classList.add('p-3', 'rounded-lg');
+            if (isSuccess) {
+                element.classList.add('bg-green-100', 'text-green-800');
+            } else {
+                element.classList.add('bg-red-100', 'text-red-800');
+            }
+        }
+
+        // --- AUTH/UI Handlers ---
+        const AuthHandler = {
+            authContainer: null,
+            form: null,
+            isSignIn: true, // true for Sign In, false for Sign Up
+
+            init() {
+                this.authContainer = document.getElementById('auth-form-container');
+                if (!this.authContainer) return;
+                
+                // Initial render
+                this.renderForm();
+            },
+            
+            showMessage(element, message, isSuccess) {
+                element.textContent = message;
+                element.classList.remove('hidden', 'bg-red-100', 'bg-green-100', 'text-red-800', 'text-green-800');
+                element.classList.add('p-3', 'rounded-lg');
+                if (isSuccess) {
+                    element.classList.add('bg-green-100', 'text-green-800');
+                } else {
+                    element.classList.add('bg-red-100', 'text-red-800');
+                }
+            },
+
+            resetButtonState(button, isSignIn) {
+                button.disabled = false;
+                button.textContent = isSignIn ? 'Sign In' : 'Sign Up';
+            },
+
+            renderForm() {
+                const formTitle = this.isSignIn ? 'Sign In' : 'Create Account';
+                const buttonText = this.isSignIn ? 'Sign In' : 'Sign Up';
+                const switchText = this.isSignIn ? 'Need an account? Sign Up' : 'Already have an account? Sign In';
+                
+                this.authContainer.innerHTML = `
+                    <h2 class="text-3xl font-extrabold text-gray-900 mb-6 text-center">${formTitle}</h2>
+                    <div id="auth-message" class="mb-4 text-sm text-center hidden"></div>
+                    <form id="auth-form" class="space-y-4">
+                        <div>
+                            <label for="auth-email" class="block text-sm font-medium text-gray-700">Email Address</label>
+                            <input type="email" id="auth-email" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                        </div>
+                        <div>
+                            <label for="auth-password" class="block text-sm font-medium text-gray-700">Password</label>
+                            <input type="password" id="auth-password" required minlength="6" class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                        </div>
+                        <div>
+                            <button type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-xl text-lg font-bold text-white gradient-bg-v2 hover:opacity-90 transition transform hover:scale-[1.01]">
+                                ${buttonText}
+                            </button>
+                        </div>
+                    </form>
+                    <button id="auth-switch-btn" class="mt-4 w-full text-center text-sm font-semibold text-indigo-600 hover:text-indigo-800 transition">
+                        ${switchText}
+                    </button>
+                `;
+                
+                this.form = document.getElementById('auth-form');
+                this.form.addEventListener('submit', (e) => this.handleSubmit(e));
+                
+                document.getElementById('auth-switch-btn').addEventListener('click', () => {
+                    this.isSignIn = !this.isSignIn;
+                    this.renderForm(); // Re-render the form for sign-in/sign-up
+                });
+            },
+            
+            async handleSubmit(e) {
+                e.preventDefault();
+                const email = document.getElementById('auth-email').value;
+                const password = document.getElementById('auth-password').value;
+                const messageEl = document.getElementById('auth-message');
+                const submitBtn = this.form.querySelector('button[type="submit"]');
+                
+                // --- SECURITY IMPROVEMENT: Client-side Input Validation ---
+                if (password.length < 6) {
+                    this.showMessage(messageEl, "Password must be at least 6 characters long.", false);
+                    this.resetButtonState(submitBtn, this.isSignIn);
+                    return;
+                }
+                
+                // Show loading state
+                submitBtn.disabled = true;
+                submitBtn.textContent = this.isSignIn ? 'Signing In...' : 'Signing Up...';
+                
+                let result;
+                if (this.isSignIn) {
+                    result = await FirebaseService.signIn(email, password);
+                } else {
+                    result = await FirebaseService.signUp(email, password);
+                }
+
+                // Show result message
+                this.showMessage(messageEl, result.message, result.success);
+                
+                // Reset button state on failure
+                if (!result.success) {
+                    this.resetButtonState(submitBtn, this.isSignIn);
+                }
+                // On success, the onAuthStateChanged listener will close the modal
+            }
+        };
+
+        // --- AI Chat Module (with Google Search Grounding) ---
+        const AIChat = {
+            chatHistory: [
+                { role: "model", parts: [{ text: "Hello! I am your AI assistant for EVEREST PEAK. I can help you with app features, data insights (GeoRank/Call Logs), or general knowledge. **I use Google Search for real-time information.** What can I help you with?" }] }
+            ],
+            button: document.getElementById('chat-toggle-btn'),
+            container: document.getElementById('ai-chat-container'),
+            chatBox: document.getElementById('chat-box'),
+            closeButton: document.getElementById('chat-close-btn'),
+            form: document.getElementById('chat-form'),
+            input: document.getElementById('chat-input'),
+            sendBtn: document.getElementById('chat-send-btn'),
+            promptsContainer: document.getElementById('suggested-prompts'),
+            
+            toggle() {
+                this.container.classList.toggle('hidden');
+                if (!this.container.classList.contains('hidden')) {
+                    this.input.focus();
+                    this.scrollToBottom();
+                }
+            },
+
+            scrollToBottom() {
+                this.chatBox.scrollTop = this.chatBox.scrollHeight;
+            },
+            
+            renderChat() {
+                this.chatBox.innerHTML = this.chatHistory.map(message => {
+                    const isUser = message.role === 'user';
+                    const avatar = isUser ? '👤' : '🤖';
+                    const bgColor = isUser ? 'bg-indigo-100/50' : 'bg-white';
+                    const alignment = isUser ? 'self-end' : 'self-start';
+                    const textContent = message.parts[0].text;
+                    
+                    // Simple markdown to HTML conversion for strong emphasis
+                    const htmlContent = textContent.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>').replace(/\n/g, '<br>');
+
+                    return `
+                        <div class="flex flex-col ${alignment} max-w-[85%] mb-3">
+                            <div class="text-xs text-gray-400 mb-1">${isUser ? 'You' : 'AI Assistant'}</div>
+                            <div class="flex items-start space-x-2">
+                                ${!isUser ? `<div class="p-2 rounded-full bg-indigo-200 text-sm">${avatar}</div>` : ''}
+                                <div class="p-4 rounded-xl shadow-md ${bgColor} ring-1 ring-gray-200 text-gray-700 text-sm">
+                                    ${htmlContent}
+                                </div>
+                                ${isUser ? `<div class="p-2 rounded-full bg-indigo-600 text-white text-sm">${avatar}</div>` : ''}
+                            </div>
+                        </div>
+                    `;
+                }).join('');
+                this.scrollToBottom();
+            },
+            
+            renderPrompts() {
+                 const prompts = [
+                    "What are the benefits of using GeoRank?",
+                    "How does the Data Vault protect my information?",
+                    "Summarize the latest quarterly tech news." 
+                ];
+                
+                this.promptsContainer.innerHTML = prompts.map(prompt => `
+                    <button class="prompt-btn text-xs px-3 py-1 bg-gray-100 text-gray-600 rounded-full hover:bg-indigo-100 hover:text-indigo-600 transition shadow-sm">
+                        ${prompt}
+                    </button>
+                `).join('');
+            },
+
+            async sendMessage(e) {
+                e.preventDefault();
+                const prompt = this.input.value.trim();
+                if (!prompt) return;
+
+                // 1. Add user message to history and update UI
+                this.chatHistory.push({ role: "user", parts: [{ text: prompt }] });
+                this.renderChat();
+                this.input.value = '';
+                this.sendBtn.disabled = true;
+                this.input.placeholder = "Generating response...";
+
+                // 2. Add temporary loading message (Model role)
+                const loadingMessage = { role: "model", parts: [{ text: "..." }] };
+                this.chatHistory.push(loadingMessage);
+                this.renderChat();
+
+                // 3. Prepare System Instruction for Gemini
+                const systemPrompt = "You are the EVEREST PEAK AI Assistant. Your goal is to provide helpful, concise, and accurate responses. You MUST use Google Search grounding for any questions requiring real-time data, like news, market trends, or up-to-date facts. Format your responses clearly, using **markdown for emphasis**.";
+                const userQuery = prompt;
+                const apiKey = ""; // Canvas will provide this
+
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+                const payload = {
+                    contents: [{ parts: [{ text: userQuery }] }],
+                    // MANDATORY: Include Google Search grounding tool
+                    tools: [{ "google_search": {} }],
+                    systemInstruction: {
+                        parts: [{ text: systemPrompt }]
+                    },
+                };
+                
+                // Retry logic using exponential backoff
+                let responseText = "Sorry, I couldn't get a response. Please try again.";
+                let sources = [];
+                const maxRetries = 3;
+                let delay = 1000; // 1 second
+                
+                for (let i = 0; i < maxRetries; i++) {
+                    try {
+                        const response = await fetch(apiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+
+                        if (response.ok) {
+                            const result = await response.json();
+                            const candidate = result.candidates?.[0];
+
+                            if (candidate && candidate.content?.parts?.[0]?.text) {
+                                responseText = candidate.content.parts[0].text;
+                                
+                                // Extract and format grounding sources
+                                const groundingMetadata = candidate.groundingMetadata;
+                                if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                                    sources = groundingMetadata.groundingAttributions
+                                        .map(attribution => ({
+                                            uri: attribution.web?.uri,
+                                            title: attribution.web?.title,
+                                        }))
+                                        .filter(source => source.uri && source.title); 
+                                    
+                                    if (sources.length > 0) {
+                                        const sourcesList = sources.map((s, index) => 
+                                            `[${index + 1}] <a href="${s.uri}" target="_blank" class="text-indigo-600 hover:underline">${s.title.substring(0, 50)}...</a>`
+                                        ).join(' | ');
+                                        responseText += `<br><br>---<br><small><strong>Sources:</strong> ${sourcesList}</small>`;
+                                    }
+                                }
+                                break; // Success, exit retry loop
+                            }
+                        }
+                    } catch (error) {
+                        // console.error(`Attempt ${i + 1} failed:`, error); // Do not log retries as errors
+                    }
+                    if (i < maxRetries - 1) {
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        delay *= 2; // Exponential backoff
+                    }
+                }
+                
+                // 4. Replace loading message with final response
+                this.chatHistory.pop(); // Remove "..." message
+                this.chatHistory.push({
+                    role: "model",
+                    parts: [{ text: responseText }]
+                });
+                
+                this.renderChat();
+                this.sendBtn.disabled = false;
+                this.input.placeholder = "Ask about GeoRank, Call Logs, or Data Protection...";
+                this.input.focus();
+            },
+
+            init() {
+                this.button.addEventListener('click', () => this.toggle());
+                this.closeButton.addEventListener('click', () => this.toggle());
+                this.form.addEventListener('submit', (e) => this.sendMessage(e));
+                
+                this.promptsContainer.addEventListener('click', (e) => {
+                    if (e.target.classList.contains('prompt-btn')) {
+                        this.input.value = e.target.textContent;
+                        this.form.dispatchEvent(new Event('submit', { bubbles: true }));
+                    }
+                });
+                
+                this.renderChat();
+                this.renderPrompts();
+            }
+        };
+
+        // --- Design Hub (Product Creation) Logic ---
+        const DesignHub = {
+            init() {
+                const form = document.getElementById('product-creation-form');
+                if (form) {
+                    form.addEventListener('submit', (e) => this.handleProductCreation(e));
+                }
+            },
+            
+            async handleProductCreation(e) {
+                e.preventDefault();
+                const name = document.getElementById('product-name').value.trim();
+                const description = document.getElementById('product-description').value.trim();
+                const category = document.getElementById('product-category').value;
+                const messageEl = document.getElementById('design-hub-message');
+                const submitBtn = e.target.querySelector('button[type="submit"]');
+                
+                // --- SECURITY IMPROVEMENT: Client-side Input Validation ---
+                if (name.length < 3) {
+                    showValidationMessage(messageEl, "Product name must be at least 3 characters long.", false);
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Create Product';
+                    setTimeout(() => messageEl.classList.add('hidden'), 5000);
+                    return;
+                }
+                if (description.length < 10) {
+                    showValidationMessage(messageEl, "Product description must be at least 10 characters long.", false);
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Create Product';
+                    setTimeout(() => messageEl.classList.add('hidden'), 5000);
+                    return;
+                }
+
+
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Creating...';
+                
+                const result = await DataService.createProduct(name, description, category);
+
+                showValidationMessage(messageEl, result.message, result.success);
+                
+                if (result.success) {
+                    // Clear form after successful creation
+                    e.target.reset();
+                } 
+                
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Create Product';
+                
+                // Clear message after 5 seconds
+                setTimeout(() => messageEl.classList.add('hidden'), 5000);
+            }
+        };
+
+        // Finance Handler Logic
+        const FinanceHandler = {
+            init() {
+                const depositForm = document.getElementById('deposit-form');
+                if (depositForm) {
+                    depositForm.addEventListener('submit', (e) => this.handleDeposit(e));
+                }
+
+                const transferBtn = document.getElementById('transfer-funds-btn');
+                if (transferBtn) {
+                    transferBtn.addEventListener('click', (e) => this.handleTransfer(e));
+                }
+            },
+            
+            async handleDeposit(e) {
+                e.preventDefault();
+                const amountInput = document.getElementById('deposit-amount');
+                const amount = parseFloat(amountInput.value);
+                const messageEl = document.getElementById('deposit-message');
+                const submitBtn = e.target.querySelector('button[type="submit"]');
+
+                // --- SECURITY IMPROVEMENT: Client-side Input Validation ---
+                if (isNaN(amount) || amount <= 0) {
+                    showValidationMessage(messageEl, "Please enter a valid amount greater than zero.", false);
+                    setTimeout(() => messageEl.classList.add('hidden'), 3000);
+                    return;
+                }
+
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Depositing...';
+
+                const result = await DataService.depositFunds(amount);
+
+                showValidationMessage(messageEl, result.message, result.success);
+                
+                if (result.success) {
+                    amountInput.value = '';
+                }
+                
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Deposit Funds';
+                
+                setTimeout(() => messageEl.classList.add('hidden'), 5000);
+            },
+
+            async handleTransfer(e) {
+                const transferBtn = e.target;
+                const balance = window.appData.balance;
+                
+                if (balance <= 0) return;
+                
+                transferBtn.disabled = true;
+                transferBtn.textContent = 'Processing Transfer...';
+
+                const result = await DataService.transferFunds();
+                
+                const transferMsg = document.getElementById('transfer-message');
+                transferMsg.classList.remove('hidden');
+
+                if (result.success) {
+                    showValidationMessage(transferMsg, result.message, true);
+                } else {
+                    showValidationMessage(transferMsg, result.message, false);
+                    // Re-enable button on failure
+                    transferBtn.disabled = false; 
+                    transferBtn.textContent = `Connect Card & Transfer \$${balance.toFixed(2)} Now`;
+                }
+
+                setTimeout(() => transferMsg.classList.add('hidden'), 7000);
+            }
+        };
+
+        // NEW: Social Hub Handler Logic
+        const SocialHubHandler = {
+            init() {
+                const callLogForm = document.getElementById('call-log-form');
+                if (callLogForm) {
+                    callLogForm.addEventListener('submit', (e) => this.handleCallLog(e));
+                }
+            },
+
+            async handleCallLog(e) {
+                e.preventDefault();
+                const type = document.getElementById('call-log-type').value;
+                const number = document.getElementById('call-log-number').value.trim();
+                const duration = parseFloat(document.getElementById('call-log-duration').value);
+                const messageEl = document.getElementById('call-log-message');
+                const submitBtn = e.target.querySelector('button[type="submit"]');
+
+                // --- Client-side Input Validation ---
+                if (number.length < 5) {
+                    showValidationMessage(messageEl, "Please enter a valid phone number (at least 5 characters).", false);
+                    setTimeout(() => messageEl.classList.add('hidden'), 3000);
+                    return;
+                }
+
+                if (type !== 'Missed' && (isNaN(duration) || duration <= 0)) {
+                    showValidationMessage(messageEl, "Please enter a valid call duration greater than zero.", false);
+                    setTimeout(() => messageEl.classList.add('hidden'), 3000);
+                    return;
+                }
+
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Logging Call...';
+
+                // Pass 0 duration for missed calls
+                const callDuration = type === 'Missed' ? 0.01 : duration; 
+
+                const result = await DataService.logCall(type, number, callDuration);
+
+                showValidationMessage(messageEl, result.message, result.success);
+
+                if (result.success) {
+                    e.target.reset();
+                }
+
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Log Call';
+
+                setTimeout(() => messageEl.classList.add('hidden'), 5000);
+            }
+        };
+
+        
+        // --- APP INITIALIZATION ---
+        window.addEventListener('DOMContentLoaded', () => {
+            // 1. Initialize Core Services
+            FirebaseService.init(); // Starts Auth/DB and then calls Router.init() and DataRenderer.renderAll()
+            ModalManager.init();
+            AIChat.init();
+            AuthHandler.init();
+            DesignHub.init();
+            FinanceHandler.init(); 
+            SocialHubHandler.init(); // NEW: Initialize Social Hub Handlers
+            
+            // Sign Out Button Listener
+            document.getElementById('sign-out-btn').addEventListener('click', async () => {
+                await FirebaseService.signOutUser();
+            });
+        });
+    </script>
+    <style>
+        /* Custom font for a modern look */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap');
+        
+        :root {
+            --color-primary: #4f46e5; /* Indigo 600 */
+            --color-secondary: #9333ea; /* Violet 600 */
+        }
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fc;
+        }
+
+        /* --- Custom Utilities --- */
+        .gradient-bg-v2 {
+            /* Retaining the strong gradient */
+            background: linear-gradient(135deg, var(--color-primary), var(--color-secondary));
+        }
+        
+        /* Dashboard Card Hover Effect */
+        .card-hover:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        /* Modal Backdrop */
+        .modal-backdrop {
+            transition: opacity 0.3s ease;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex antialiased">
+
+    <aside class="w-64 bg-gray-900 flex flex-col p-4 shadow-2xl">
+        <div class="text-3xl font-extrabold text-white mb-8 border-b border-indigo-700 pb-4">
+            EVEREST <span class="text-indigo-400 font-medium text-lg block">PEAK Platform</span>
+        </div>
+        <nav class="flex-grow space-y-2">
+            <a href="#" data-route="dashboard" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out bg-indigo-700 text-white shadow-md">
+                <i data-lucide="layout-dashboard" class="w-5 h-5"></i>
+                <span class="font-semibold">Dashboard</span>
+            </a>
+            <a href="#" data-route="products" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="package" class="w-5 h-5"></i>
+                <span class="font-semibold">Products</span>
+            </a>
+            <a href="#" data-route="rankings" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="award" class="w-5 h-5"></i>
+                <span class="font-semibold">Ratings & Rank</span>
+            </a>
+            <a href="#" data-route="finance" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="wallet" class="w-5 h-5"></i>
+                <span class="font-semibold">Finance</span>
+            </a>
+            <a href="#" data-route="social-hub" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="message-square-text" class="w-5 h-5"></i>
+                <span class="font-semibold">Social Hub</span>
+            </a>
+            <a href="#" data-route="display" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="monitor-dot" class="w-5 h-5"></i>
+                <span class="font-semibold">Display (Popular)</span>
+            </a>
+            <a href="#" data-route="salesman" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="users" class="w-5 h-5"></i>
+                <span class="font-semibold">Salesman (Top Users)</span>
+            </a>
+            <a href="#" data-route="design-hub" class="flex items-center space-x-3 p-3 rounded-xl text-indigo-200 hover:bg-indigo-600 transition duration-150 ease-in-out">
+                <i data-lucide="cog" class="w-5 h-5"></i>
+                <span class="font-semibold">Design Hub (Create)</span>
+            </a>
+        </nav>
+        
+        <div class="mt-8 pt-4 border-t border-indigo-700">
+            <div class="text-sm text-indigo-400 mb-2 font-semibold">Security Status: <span id="auth-status" class="font-bold text-yellow-300">Loading...</span></div>
+            <div id="user-id-display" class="text-xs text-gray-400 truncate mb-3 font-mono">User ID: N/A</div>
+            <button id="sign-out-btn" class="w-full text-base py-2 rounded-lg bg-red-600 text-white hover:bg-red-700 transition duration-150 font-bold hidden shadow-lg">
+                <i data-lucide="log-out" class="w-4 h-4 inline-block mr-1"></i> Sign Out
+            </button>
+            <button onclick="ModalManager.open('authModal')" class="w-full text-base py-2 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition duration-150 font-bold shadow-lg" id="sign-in-prompt-btn">
+                <i data-lucide="log-in" class="w-4 h-4 inline-block mr-1"></i> Sign In / Up
+            </button>
+        </div>
+    </aside>
+
+    <main class="flex-grow p-4 md:p-10 overflow-y-auto bg-gray-50">
+        
+        <div id="dashboard-view" class="space-y-10">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">Dashboard Overview</h1>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+                
+                <div class="bg-white p-6 rounded-xl shadow-xl border-l-4 border-indigo-500 card-hover transition duration-300">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-sm font-medium text-gray-500 uppercase tracking-wider">Current GeoRank Score</h2>
+                        <i data-lucide="trending-up" class="w-6 h-6 text-indigo-500"></i>
+                    </div>
+                    <p class="text-5xl font-extrabold text-gray-900 mt-2">9.8</p>
+                    <p class="text-sm font-semibold text-green-600 mt-2">+1.2% since last week</p>
+                </div>
+                
+                <div class="bg-white p-6 rounded-xl shadow-xl border-l-4 border-violet-500 card-hover transition duration-300">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-sm font-medium text-gray-500 uppercase tracking-wider">Data Security Index</h2>
+                        <i data-lucide="shield-check" class="w-6 h-6 text-violet-500"></i>
+                    </div>
+                    <p class="text-5xl font-extrabold text-gray-900 mt-2">A+</p>
+                    <p class="text-sm text-gray-600 mt-2">All logs secured with Vault-X encryption.</p>
+                </div>
+                
+                <div class="bg-white p-6 rounded-xl shadow-xl border-l-4 border-pink-500 card-hover transition duration-300">
+                    <div class="flex items-center justify-between">
+                        <h2 class="text-sm font-medium text-gray-500 uppercase tracking-wider">Active Products</h2>
+                        <i data-lucide="boxes" class="w-6 h-6 text-pink-500"></i>
+                    </div>
+                    <p class="text-5xl font-extrabold text-gray-900 mt-2"><span id="total-products-count">0</span></p>
+                    <p class="text-sm text-gray-600 mt-2">Managed in your private Design Hub.</p>
+                </div>
+            </div>
+            
+            <div class="bg-white p-8 rounded-xl shadow-2xl border border-gray-100">
+                <h2 class="text-2xl font-bold text-gray-900 mb-6 border-b pb-3">GeoRank Trend Analysis</h2>
+                <div class="h-80">
+                    <canvas id="geoRankChart"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <div id="products-view" class="hidden space-y-8">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">Your Created Products</h1>
+            <p class="text-lg text-gray-600">This view securely displays the products you have created in the Design Hub, loaded in real-time from your private data vault.</p>
+            
+            <div id="product-list-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                </div>
+        </div>
+        
+        <div id="rankings-view" class="hidden space-y-8">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">System Ratings & Ranking</h1>
+            <p class="text-lg text-gray-600">Detailed breakdown of the core EVEREST PEAK solutions' performance metrics.</p>
+            
+            <div class="bg-white overflow-hidden shadow-2xl rounded-xl border border-gray-100">
+                <table class="min-w-full divide-y divide-gray-200">
+                    <thead class="bg-indigo-50">
+                        <tr>
+                            <th scope="col" class="px-6 py-4 text-left text-sm font-bold text-indigo-800 uppercase tracking-wider">Rank</th>
+                            <th scope="col" class="px-6 py-4 text-left text-sm font-bold text-indigo-800 uppercase tracking-wider">Solution Name</th>
+                            <th scope="col" class="px-6 py-4 text-left text-sm font-bold text-indigo-800 uppercase tracking-wider">Rating Score (10)</th>
+                            <th scope="col" class="px-6 py-4 text-left text-sm font-bold text-indigo-800 uppercase tracking-wider">Trend</th>
+                        </tr>
+                    </thead>
+                    <tbody id="rankings-table-body" class="bg-white divide-y divide-gray-100">
+                        </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <div id="finance-view" class="hidden space-y-8">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">Finance & Fund Management</h1>
+            <p class="text-lg text-gray-600">Manage your deposited funds, which are securely held until you connect a payment method.</p>
+            
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                
+                <div class="lg:col-span-1 space-y-6">
+                    
+                    <div class="bg-white p-6 rounded-xl shadow-2xl border-t-8 border-indigo-500">
+                        <div class="flex justify-between items-center">
+                            <h2 class="text-xl font-bold text-gray-700">Funds Stored</h2>
+                            <i data-lucide="piggy-bank" class="w-8 h-8 text-indigo-500"></i>
+                        </div>
+                        <p id="stored-balance" class="text-6xl font-extrabold text-gray-900 mt-2">$0.00</p>
+                        <p class="text-sm text-gray-500 mt-2">Total amount waiting for transfer.</p>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl shadow-xl border border-gray-100">
+                        <h3 class="text-2xl font-bold mb-5 text-gray-800 border-b pb-3">Simulate Deposit</h3>
+                        <div id="deposit-message" class="mb-4 text-sm text-center hidden font-medium"></div>
+                        <form id="deposit-form" class="space-y-4">
+                            <div>
+                                <label for="deposit-amount" class="block text-sm font-medium text-gray-700">Amount to Deposit ($)</label>
+                                <input type="number" step="0.01" min="0.01" id="deposit-amount" required class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm text-lg focus:outline-none focus:ring-green-500 focus:border-green-500" placeholder="e.g., 50.00">
+                            </div>
+                            <button type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-xl text-lg font-bold text-white bg-green-600 hover:bg-green-700 transition duration-300 transform hover:scale-[1.01]">
+                                <i data-lucide="plus" class="w-5 h-5 mr-2"></i> Deposit Funds
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="lg:col-span-2 space-y-6">
+                    
+                    <div class="bg-white p-6 rounded-xl shadow-xl">
+                        <div class="flex justify-between items-center mb-4 border-b pb-3">
+                            <h2 class="text-2xl font-bold text-gray-800">Credit Card Status</h2>
+                            <div id="card-status">
+                                </div>
+                        </div>
+                        
+                        <div id="transfer-message" class="hidden font-medium mb-4"></div>
+                        
+                        <button id="transfer-funds-btn" class="w-full py-4 px-4 rounded-lg shadow-2xl text-xl font-bold text-white gradient-bg-v2 hover:opacity-90 transition duration-300 hidden">
+                            </button>
+                        
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl shadow-xl">
+                        <h3 class="text-2xl font-bold mb-4 text-gray-800 border-b pb-2">Transaction History</h3>
+                        <ul id="transaction-list" class="divide-y divide-gray-200">
+                            </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="social-hub-view" class="hidden space-y-8">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">Social Hub: Calls & Activity</h1>
+            <p class="text-lg text-gray-600">Simulate and track your call logs and social media engagement for analysis.</p>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div class="lg:col-span-1 space-y-6">
+                     <div class="bg-white p-6 rounded-xl shadow-2xl border-t-8 border-indigo-500">
+                        <div class="flex justify-between items-center">
+                            <h2 class="text-xl font-bold text-gray-700">Total Call Logs</h2>
+                            <i data-lucide="phone" class="w-8 h-8 text-indigo-500"></i>
+                        </div>
+                        <p id="total-call-logs" class="text-6xl font-extrabold text-gray-900 mt-2">0</p>
+                        <p class="text-sm text-gray-500 mt-2">Recorded items in your private log.</p>
+                    </div>
+
+                    <div class="bg-white p-6 rounded-xl shadow-xl border border-gray-100">
+                        <h3 class="text-2xl font-bold mb-5 text-gray-800 border-b pb-3">Simulate Call Log</h3>
+                        <div id="call-log-message" class="mb-4 text-sm text-center hidden font-medium"></div>
+                        <form id="call-log-form" class="space-y-4">
+                            <div>
+                                <label for="call-log-number" class="block text-sm font-medium text-gray-700">Phone Number / Contact</label>
+                                <input type="text" id="call-log-number" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="e.g., +1 555 123 4567">
+                            </div>
+                            <div>
+                                <label for="call-log-type" class="block text-sm font-medium text-gray-700">Call Type</label>
+                                <select id="call-log-type" required class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                                    <option value="Incoming">Incoming (Answered)</option>
+                                    <option value="Outgoing">Outgoing (Completed)</option>
+                                    <option value="Missed">Missed Call</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="call-log-duration" class="block text-sm font-medium text-gray-700">Duration (Minutes, &gt; 0)</label>
+                                <input type="number" step="0.01" min="0.01" id="call-log-duration" class="mt-1 block w-full px-4 py-2 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="e.g., 5.3">
+                                <p class="text-xs text-gray-500 mt-1">Set to 0 or leave blank for Missed calls.</p>
+                            </div>
+                            <button type="submit" class="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg shadow-xl text-lg font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition duration-300 transform hover:scale-[1.01]">
+                                <i data-lucide="phone-call" class="w-5 h-5 mr-2"></i> Log Call
+                            </button>
+                        </form>
+                    </div>
+                </div>
+
+                <div class="lg:col-span-2 space-y-6">
+                    <div class="bg-white p-6 rounded-xl shadow-xl">
+                        <h3 class="text-2xl font-bold mb-4 text-gray-800 border-b pb-2">Call Log History</h3>
+                        <ul id="call-log-list" class="divide-y divide-gray-200">
+                            </ul>
+                    </div>
+                    
+                    <div class="bg-white p-6 rounded-xl shadow-xl border-t-4 border-violet-500">
+                        <h3 class="text-2xl font-bold mb-4 text-gray-800 border-b pb-2">Social Media Activity Summary</h3>
+                        <p class="text-gray-600 italic">Integration with social media platforms coming soon. Currently simulating a high level of engagement and data security.</p>
+                        <ul class="mt-4 space-y-3">
+                            <li class="flex items-center space-x-3 text-gray-700">
+                                <i data-lucide="twitter" class="w-5 h-5 text-blue-500"></i>
+                                <span>**Twitter/X**: Daily Sentiment Score: <span class="font-bold text-green-600">8.9/10</span></span>
+                            </li>
+                            <li class="flex items-center space-x-3 text-gray-700">
+                                <i data-lucide="instagram" class="w-5 h-5 text-pink-500"></i>
+                                <span>**Instagram**: Engagement Rate: <span class="font-bold text-indigo-600">7.2%</span> (Last 7 Days)</span>
+                            </li>
+                             <li class="flex items-center space-x-3 text-gray-700">
+                                <i data-lucide="facebook" class="w-5 h-5 text-blue-800"></i>
+                                <span>**Facebook**: Reach Index: <span class="font-bold text-yellow-600">Medium-High</span></span>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="display-view" class="hidden space-y-8">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">Display: Popular Products & Design</h1>
+            <p class="text-lg text-gray-600">Explore the highest-rated products and their design quality scores across various categories.</p>
+            
+            <div id="display-product-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                </div>
+            
+            <div class="bg-indigo-50 p-8 rounded-xl shadow-inner border border-indigo-200">
+                 <h2 class="text-2xl font-bold text-indigo-900 mb-4 flex items-center">
+                    <i data-lucide="lightbulb" class="w-6 h-6 mr-3"></i> Design Philosophy
+                 </h2>
+                 <p class="text-indigo-800">EVEREST PEAK prioritizes **Minimalist Functionality** and **Data-Driven Aesthetics**. All popular products exhibit a design score of 85% or higher, reflecting superior user experience and engineering rigor.</p>
+            </div>
+        </div>
+        <div id="salesman-view" class="hidden space-y-8">
+            <h1 class="text-4xl font-extrabold text-gray-900 border-b pb-4">Salesman Hub: Top Product Creators</h1>
+            <p class="text-lg text-gray-600">Connect with the creators of the highest-rated product in each core category. These are your go-to experts for collaboration and inquiries.</p>
+            
+            <div id="salesman-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+                </div>
+            
+            <div class="bg-violet-50 p-6 rounded-xl shadow-inner border border-violet-200">
+                <p class="text-sm font-medium text-violet-800 flex items-center">
+                    <i data-lucide="info" class="w-5 h-5 mr-2"></i>
+                    NOTE: Contact information displayed here is simulated based on product category ownership and is for demonstration purposes only.
+                </p>
+            </div>
+        </div>
+        <div id="design-hub-view" class="hidden space-y-8 max-w-3xl mx-auto">
+            <h1 class="text-4xl font-extrabold text-gray-900 text-center border-b pb-4">Design Hub: Product Creation</h1>
+            <p class="text-lg text-gray-600 text-center">Use this powerful feature to model and define a new product. Data is stored securely and privately under your user ID.</p>
+            
+            <div class="bg-white p-8 rounded-xl shadow-2xl border border-indigo-100">
+                <div id="design-hub-message" class="mb-6 text-sm text-center hidden font-medium"></div>
+                <form id="product-creation-form" class="space-y-6">
+                    <div>
+                        <label for="product-name" class="block text-sm font-medium text-gray-700">Product Name</label>
+                        <input type="text" id="product-name" required class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="e.g., Global Market Insight Tool">
+                    </div>
+                    <div>
+                        <label for="product-category" class="block text-sm font-medium text-gray-700">Category</label>
+                        <select id="product-category" required class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+                            <option value="Software">Software</option>
+                            <option value="Hardware">Hardware</option>
+                            <option value="Service">Service</option>
+                            <option value="Data">Data</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label for="product-description" class="block text-sm font-medium text-gray-700">Detailed Description</label>
+                        <textarea id="product-description" rows="4" required class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500" placeholder="Describe the product's function, target user, and key features."></textarea>
+                    </div>
+                    
+                    <button type="submit" class="w-full flex justify-center py-4 px-4 border border-transparent rounded-lg shadow-xl text-xl font-bold text-white gradient-bg-v2 hover:opacity-90 transition duration-300 transform hover:scale-[1.01]">
+                        <i data-lucide="sparkles" class="w-6 h-6 inline-block mr-2"></i> Create Product
+                    </button>
+                </form>
+            </div>
+        </div>
+        
+    </main>
+
+    <button id="chat-toggle-btn" class="fixed bottom-8 right-8 p-5 rounded-full gradient-bg-v2 text-white shadow-xl hover:shadow-2xl transition duration-300 z-50 transform hover:scale-105">
+        <i data-lucide="message-square-text" class="w-7 h-7"></i>
+    </button>
+
+    <div id="ai-chat-container" class="hidden fixed bottom-24 right-8 w-full max-w-sm md:max-w-md h-[70vh] bg-gray-50 rounded-xl shadow-2xl flex flex-col z-50 border border-gray-200">
+        <div class="p-4 flex justify-between items-center gradient-bg-v2 text-white rounded-t-xl shadow-md">
+            <span class="font-bold text-xl">AI Assistant (Gemini)</span>
+            <button id="chat-close-btn" class="p-1 rounded-full hover:bg-indigo-700 transition">
+                <i data-lucide="x" class="w-6 h-6"></i>
+            </button>
+        </div>
+        
+        <div id="chat-box" class="flex-grow p-4 space-y-4 overflow-y-auto bg-gray-100/50">
+            </div>
+        
+        <div class="p-4 border-t border-gray-200 bg-white">
+            <div id="suggested-prompts" class="flex flex-wrap gap-2 mb-3">
+                </div>
+            <form id="chat-form" class="flex space-x-2">
+                <input type="text" id="chat-input" class="flex-grow px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 text-base shadow-sm" placeholder="Ask about GeoRank, Call Logs, or Data Protection..." required>
+                <button id="chat-send-btn" type="submit" class="p-3 rounded-lg gradient-bg-v2 text-white hover:opacity-90 transition shadow-md">
+                    <i data-lucide="send" class="w-6 h-6"></i>
+                </button>
+            </form>
+        </div>
+    </div>
+    
+    <div id="authModal" class="modal-backdrop fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center p-4 hidden opacity-0 transition-opacity duration-300 z-[100]">
+        <div class="bg-white w-full max-w-md p-8 rounded-xl shadow-2xl relative">
+            <button class="modal-close absolute top-4 right-4 text-gray-400 hover:text-gray-600">
+                <i data-lucide="x" class="w-7 h-7"></i>
+            </button>
+            <div id="auth-form-container">
+                </div>
+        </div>
+    </div>
+
+    <script>
+        // Initialize lucide icons for all dynamically loaded content
+        lucide.createIcons();
+    </script>
+</body>
+</html>
